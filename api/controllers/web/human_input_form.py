@@ -16,6 +16,7 @@ from werkzeug.exceptions import Forbidden
 
 from configs import dify_config
 from controllers.common.errors import NotFoundError
+from core.workflow.human_input_policy import HumanInputSurface, is_recipient_type_allowed_for_surface
 from controllers.common.human_input import HumanInputFormSubmitPayload, stringify_form_default_values
 from controllers.common.schema import register_response_schema_models, register_schema_models
 from controllers.web import web_ns
@@ -77,6 +78,11 @@ _FORM_UPLOAD_TOKEN_RATE_LIMITER = RateLimiter(
 )
 
 
+def _ensure_form_is_allowed_for_web(form: Form) -> None:
+    if not is_recipient_type_allowed_for_surface(form.recipient_type, HumanInputSurface.WEB):
+        raise NotFoundError("Form not found")
+
+
 def _create_upload_service() -> HumanInputFileUploadService:
     session_factory = sessionmaker(bind=db.engine)
     workflow_run_repository = DifyAPIRepositoryFactory.create_api_workflow_run_repository(session_factory)
@@ -131,6 +137,12 @@ class HumanInputFormUploadTokenApi(Resource):
             raise WebFormRateLimitExceededError()
         _FORM_UPLOAD_TOKEN_RATE_LIMITER.increment_rate_limit(ip_address)
 
+        service = HumanInputService(db.engine)
+        form = service.get_form_by_token(form_token)
+        if form is None:
+            raise NotFoundError("Form not found")
+        _ensure_form_is_allowed_for_web(form)
+
         try:
             token = _create_upload_service().issue_upload_token(form_token)
         except FormNotFoundError:
@@ -163,13 +175,12 @@ class HumanInputFormApi(Resource):
         _FORM_ACCESS_RATE_LIMITER.increment_rate_limit(ip_address)
 
         service = HumanInputService(db.engine)
-        # TODO(QuantumGhost): forbid submission for form tokens
-        # that are only for console.
         form = service.get_form_by_token(form_token)
 
         if form is None:
             raise NotFoundError("Form not found")
 
+        _ensure_form_is_allowed_for_web(form)
         service.ensure_form_active(form)
         app_model, site = _get_app_site_from_form(form)
         inputs = service.resolve_form_inputs(form)
@@ -208,6 +219,8 @@ class HumanInputFormApi(Resource):
         form = service.get_form_by_token(form_token)
         if form is None:
             raise NotFoundError("Form not found")
+
+        _ensure_form_is_allowed_for_web(form)
 
         if (recipient_type := form.recipient_type) is None:
             logger.warning("Recipient type is None for form, form_id=%", form.id)

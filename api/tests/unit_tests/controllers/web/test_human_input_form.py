@@ -14,6 +14,7 @@ from werkzeug.exceptions import Forbidden
 
 import controllers.web.human_input_form as human_input_module
 import controllers.web.site as site_module
+from controllers.common.errors import NotFoundError
 from controllers.web.error import WebFormRateLimitExceededError
 from graphon.nodes.human_input.entities import ParagraphInputConfig, SelectInputConfig, StringListSource
 from graphon.nodes.human_input.enums import ValueSourceType
@@ -82,7 +83,7 @@ def test_get_form_includes_site(monkeypatch: pytest.MonkeyPatch, app: Flask):
             self.app_id = "app-1"
             self.tenant_id = "tenant-1"
             self.expiration_time = expiration
-            self.recipient_type = RecipientType.BACKSTAGE
+            self.recipient_type = RecipientType.STANDALONE_WEB_APP
 
         def get_definition(self):
             return _FakeDefinition()
@@ -355,19 +356,25 @@ def test_create_upload_token_returns_token_and_form_expiration(monkeypatch: pyte
     """POST returns a HITL upload token for an active form token."""
 
     expiration_time = datetime(2099, 1, 1, tzinfo=UTC)
-    service_mock = MagicMock()
-    service_mock.issue_upload_token.return_value = SimpleNamespace(
+
+    class _FakeForm:
+        recipient_type = RecipientType.STANDALONE_WEB_APP
+
+    upload_service_mock = MagicMock()
+    upload_service_mock.issue_upload_token.return_value = SimpleNamespace(
         upload_token="hitl_upload_token-1",
         expires_at=expiration_time,
     )
+    human_input_service_mock = MagicMock()
+    human_input_service_mock.get_form_by_token.return_value = _FakeForm()
     workflow_run_repository = MagicMock()
     repo_factory = MagicMock(return_value=workflow_run_repository)
     captured: dict[str, object] = {}
 
-    def _service_factory(session_factory, workflow_run_repository):
+    def _upload_service_factory(session_factory, workflow_run_repository):
         captured["session_factory"] = session_factory
         captured["workflow_run_repository"] = workflow_run_repository
-        return service_mock
+        return upload_service_mock
 
     monkeypatch.setattr(
         human_input_module.DifyAPIRepositoryFactory,
@@ -377,8 +384,9 @@ def test_create_upload_token_returns_token_and_form_expiration(monkeypatch: pyte
     monkeypatch.setattr(
         human_input_module,
         "HumanInputFileUploadService",
-        _service_factory,
+        _upload_service_factory,
     )
+    monkeypatch.setattr(human_input_module, "HumanInputService", lambda engine: human_input_service_mock)
     monkeypatch.setattr(human_input_module, "db", SimpleNamespace(engine=object()))
 
     limiter_mock = MagicMock()
@@ -396,128 +404,63 @@ def test_create_upload_token_returns_token_and_form_expiration(monkeypatch: pyte
     }
     repo_factory.assert_called_once()
     assert captured["workflow_run_repository"] is workflow_run_repository
-    service_mock.issue_upload_token.assert_called_once_with("token-1")
+    human_input_service_mock.get_form_by_token.assert_called_once_with("token-1")
+    upload_service_mock.issue_upload_token.assert_called_once_with("token-1")
     limiter_mock.increment_rate_limit.assert_called_once_with("203.0.113.10")
 
 
-def test_get_form_allows_backstage_token(monkeypatch: pytest.MonkeyPatch, app: Flask):
-    """GET returns form payload for backstage token."""
-
-    expiration_time = datetime(2099, 1, 2, tzinfo=UTC)
-
-    class _FakeDefinition:
-        def model_dump(self, mode: str | None = None):
-            return {
-                "form_content": "Raw content",
-                "rendered_content": "Rendered",
-                "inputs": [],
-                "default_values": {},
-                "user_actions": [],
-            }
+def test_create_upload_token_rejects_backstage_token(monkeypatch: pytest.MonkeyPatch, app: Flask):
+    """POST rejects upload-token issuance for backstage tokens on the public web surface."""
 
     class _FakeForm:
-        def __init__(self, expiration: datetime):
-            self.workflow_run_id = "workflow-1"
-            self.app_id = "app-1"
-            self.tenant_id = "tenant-1"
-            self.expiration_time = expiration
+        recipient_type = RecipientType.BACKSTAGE
 
-        def get_definition(self):
-            return _FakeDefinition()
+    human_input_service_mock = MagicMock()
+    human_input_service_mock.get_form_by_token.return_value = _FakeForm()
+    upload_service_mock = MagicMock()
+    monkeypatch.setattr(human_input_module, "HumanInputService", lambda engine: human_input_service_mock)
+    monkeypatch.setattr(
+        human_input_module,
+        "_create_upload_service",
+        lambda: upload_service_mock,
+    )
+    monkeypatch.setattr(human_input_module, "db", SimpleNamespace(engine=object()))
 
-    form = _FakeForm(expiration_time)
+    limiter_mock = MagicMock()
+    limiter_mock.is_rate_limited.return_value = False
+    monkeypatch.setattr(human_input_module, "_FORM_UPLOAD_TOKEN_RATE_LIMITER", limiter_mock)
+    monkeypatch.setattr(human_input_module, "extract_remote_ip", lambda req: "203.0.113.10")
+
+    with app.test_request_context("/api/form/human_input/token-1/upload-token", method="POST"):
+        with pytest.raises(NotFoundError):
+            HumanInputFormUploadTokenApi().post("token-1")
+
+    upload_service_mock.issue_upload_token.assert_not_called()
+
+
+def test_get_form_rejects_backstage_token(monkeypatch: pytest.MonkeyPatch, app: Flask):
+    """GET rejects backstage tokens on the public web surface."""
+
+    class _FakeForm:
+        recipient_type = RecipientType.BACKSTAGE
+
+    form = _FakeForm()
     limiter_mock = MagicMock()
     limiter_mock.is_rate_limited.return_value = False
     monkeypatch.setattr(human_input_module, "_FORM_ACCESS_RATE_LIMITER", limiter_mock)
     monkeypatch.setattr(human_input_module, "extract_remote_ip", lambda req: "203.0.113.10")
-    tenant = SimpleNamespace(
-        id="tenant-1",
-        status=TenantStatus.NORMAL,
-        plan="basic",
-        custom_config_dict={"remove_webapp_brand": True, "replace_webapp_logo": False},
-    )
-    app_model = SimpleNamespace(id="app-1", tenant_id="tenant-1", tenant=tenant, enable_site=True)
-    workflow_run = SimpleNamespace(app_id="app-1")
-    site_model = SimpleNamespace(
-        title="My Site",
-        icon_type="emoji",
-        icon="robot",
-        icon_background="#fff",
-        description="desc",
-        default_language="en",
-        chat_color_theme="light",
-        chat_color_theme_inverted=False,
-        copyright=None,
-        privacy_policy=None,
-        input_placeholder="Ask me anything",
-        custom_disclaimer=None,
-        prompt_public=False,
-        show_workflow_steps=True,
-        use_icon_as_answer_icon=False,
-    )
 
     service_mock = MagicMock()
     service_mock.get_form_by_token.return_value = form
-    service_mock.resolve_form_inputs.return_value = []
     monkeypatch.setattr(human_input_module, "HumanInputService", lambda engine: service_mock)
-
-    db_stub = _FakeDB(_FakeSession({"WorkflowRun": workflow_run, "App": app_model, "Site": site_model}))
-    monkeypatch.setattr(human_input_module, "db", db_stub)
-
-    monkeypatch.setattr(
-        site_module.FeatureService,
-        "get_features",
-        lambda tenant_id, **_kwargs: FeatureModel(can_replace_logo=True, webapp_copyright_enabled=True),
-    )
+    monkeypatch.setattr(human_input_module, "db", _FakeDB(_FakeSession({})))
 
     with app.test_request_context("/api/form/human_input/token-1", method="GET"):
-        response = HumanInputFormApi().get("token-1")
+        with pytest.raises(NotFoundError):
+            HumanInputFormApi().get("token-1")
 
-    body = json.loads(response.get_data(as_text=True))
-    assert set(body.keys()) == {
-        "site",
-        "form_content",
-        "inputs",
-        "resolved_default_values",
-        "user_actions",
-        "expiration_time",
-    }
-    assert body["form_content"] == "Rendered"
-    assert body["inputs"] == []
-    assert body["resolved_default_values"] == {}
-    assert body["user_actions"] == []
-    assert body["expiration_time"] == int(expiration_time.timestamp())
-    assert body["site"] == {
-        "app_id": "app-1",
-        "end_user_id": None,
-        "enable_site": True,
-        "site": {
-            "title": "My Site",
-            "chat_color_theme": "light",
-            "chat_color_theme_inverted": False,
-            "icon_type": "emoji",
-            "icon": "robot",
-            "icon_background": "#fff",
-            "icon_url": None,
-            "description": "desc",
-            "copyright": None,
-            "privacy_policy": None,
-            "input_placeholder": "Ask me anything",
-            "custom_disclaimer": None,
-            "default_language": "en",
-            "prompt_public": False,
-            "show_workflow_steps": True,
-            "use_icon_as_answer_icon": False,
-        },
-        "model_config": None,
-        "plan": "basic",
-        "can_replace_logo": True,
-        "custom_config": {
-            "remove_webapp_brand": True,
-            "replace_webapp_logo": None,
-        },
-    }
     service_mock.get_form_by_token.assert_called_once_with("token-1")
+    service_mock.ensure_form_active.assert_not_called()
     limiter_mock.is_rate_limited.assert_called_once_with("203.0.113.10")
     limiter_mock.increment_rate_limit.assert_called_once_with("203.0.113.10")
 
@@ -543,6 +486,7 @@ def test_get_form_raises_forbidden_when_site_missing(monkeypatch: pytest.MonkeyP
             self.app_id = "app-1"
             self.tenant_id = "tenant-1"
             self.expiration_time = expiration
+            self.recipient_type = RecipientType.STANDALONE_WEB_APP
 
         def get_definition(self):
             return _FakeDefinition()
@@ -570,8 +514,8 @@ def test_get_form_raises_forbidden_when_site_missing(monkeypatch: pytest.MonkeyP
     limiter_mock.increment_rate_limit.assert_called_once_with("203.0.113.10")
 
 
-def test_submit_form_accepts_backstage_token(monkeypatch: pytest.MonkeyPatch, app: Flask):
-    """POST forwards backstage submissions to the service."""
+def test_submit_form_rejects_backstage_token(monkeypatch: pytest.MonkeyPatch, app: Flask):
+    """POST rejects backstage submissions on the public web surface."""
 
     class _FakeForm:
         recipient_type = RecipientType.BACKSTAGE
@@ -591,17 +535,10 @@ def test_submit_form_accepts_backstage_token(monkeypatch: pytest.MonkeyPatch, ap
         method="POST",
         json={"inputs": {"content": "ok"}, "action": "approve"},
     ):
-        response, status = HumanInputFormApi().post("token-1")
+        with pytest.raises(NotFoundError):
+            HumanInputFormApi().post("token-1")
 
-    assert status == 200
-    assert response == {}
-    service_mock.submit_form_by_token.assert_called_once_with(
-        recipient_type=RecipientType.BACKSTAGE,
-        form_token="token-1",
-        selected_action_id="approve",
-        form_data={"content": "ok"},
-        submission_end_user_id=None,
-    )
+    service_mock.submit_form_by_token.assert_not_called()
     limiter_mock.is_rate_limited.assert_called_once_with("203.0.113.10")
     limiter_mock.increment_rate_limit.assert_called_once_with("203.0.113.10")
 
@@ -656,7 +593,7 @@ def test_get_form_rate_limited(monkeypatch: pytest.MonkeyPatch, app: Flask):
 
 def test_get_form_raises_expired(monkeypatch: pytest.MonkeyPatch, app: Flask):
     class _FakeForm:
-        pass
+        recipient_type = RecipientType.STANDALONE_WEB_APP
 
     form = _FakeForm()
     limiter_mock = MagicMock()
