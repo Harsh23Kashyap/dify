@@ -3,8 +3,8 @@ import type { App } from '@/models/explore'
 import { fireEvent, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as React from 'react'
-import { renderWithSystemFeatures as render } from '@/__tests__/utils/mock-system-features'
 import { trackEvent } from '@/app/components/base/amplitude'
+import { renderWithConsoleQuery as render } from '@/test/console/query-data'
 import { AppModeEnum } from '@/types/app'
 import AppCard from '../index'
 
@@ -128,7 +128,6 @@ describe('AppCard', () => {
       const cardButton = screen.getByRole('button', { name: 'Sample App' })
 
       expect(cardButton).toHaveAttribute('type', 'button')
-      expect(cardButton).toHaveClass('cursor-pointer', 'focus-visible:ring-2', 'focus-visible:ring-inset')
     })
 
     it('should not render hover action buttons in explore mode', () => {

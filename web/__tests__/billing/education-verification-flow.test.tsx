@@ -8,16 +8,17 @@
  * Also covers education button visibility based on context flags.
  */
 import type { UsagePlanInfo, UsageResetInfo } from '@/app/components/billing/type'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import * as React from 'react'
 import { defaultPlan } from '@/app/components/billing/config'
 import PlanComp from '@/app/components/billing/plan'
 import { Plan } from '@/app/components/billing/type'
+import { render } from '@/test/console/render'
 
 // ─── Mock state ──────────────────────────────────────────────────────────────
 let mockProviderCtx: Record<string, unknown> = {}
-let mockAppCtx: Record<string, unknown> = {}
+let mockConsoleState: Record<string, unknown> = {}
 const mockSetShowPricingModal = vi.fn()
 const mockSetShowAccountSettingModal = vi.fn()
 const mockRouterPush = vi.fn()
@@ -37,9 +38,22 @@ vi.mock('@/context/provider-context', () => ({
   useProviderContext: () => mockProviderCtx,
 }))
 
-vi.mock('@/context/app-context', () => ({
-  useAppContext: () => mockAppCtx,
-}))
+vi.mock('@/context/account-state', async () => {
+  const { createAccountStateModuleMock } = await import('@/test/console/state-fixture')
+  return createAccountStateModuleMock(() => mockConsoleState)
+})
+vi.mock('@/context/workspace-state', async () => {
+  const { createWorkspaceStateModuleMock } = await import('@/test/console/state-fixture')
+  return createWorkspaceStateModuleMock(() => mockConsoleState)
+})
+vi.mock('@/context/permission-state', async () => {
+  const { createPermissionStateModuleMock } = await import('@/test/console/state-fixture')
+  return createPermissionStateModuleMock(() => mockConsoleState)
+})
+vi.mock('@/context/version-state', async () => {
+  const { createVersionStateModuleMock } = await import('@/test/console/state-fixture')
+  return createVersionStateModuleMock(() => mockConsoleState)
+})
 
 vi.mock('@/context/modal-context', () => ({
   useModalContext: () => ({
@@ -49,10 +63,6 @@ vi.mock('@/context/modal-context', () => ({
     selector({
       setShowAccountSettingModal: mockSetShowAccountSettingModal,
     }),
-}))
-
-vi.mock('@/context/i18n', () => ({
-  useGetLanguage: () => 'en-US',
 }))
 
 // ─── Service mocks ───────────────────────────────────────────────────────────
@@ -91,23 +101,27 @@ vi.mock('@/app/education-apply/storage', () => ({
 
 // ─── External component mocks ───────────────────────────────────────────────
 vi.mock('@/app/education-apply/verify-state-modal', () => ({
-  default: ({ isShow, title, content, email, showLink }: {
+  default: ({
+    isShow,
+    title,
+    content,
+    email,
+    showLink,
+  }: {
     isShow: boolean
     title?: string
     content?: string
     email?: string
     showLink?: boolean
   }) =>
-    isShow
-      ? (
-          <div data-testid="verify-state-modal">
-            {title && <span data-testid="modal-title">{title}</span>}
-            {content && <span data-testid="modal-content">{content}</span>}
-            {email && <span data-testid="modal-email">{email}</span>}
-            {showLink && <span data-testid="modal-show-link">link</span>}
-          </div>
-        )
-      : null,
+    isShow ? (
+      <div data-testid="verify-state-modal">
+        {title && <span data-testid="modal-title">{title}</span>}
+        {content && <span data-testid="modal-content">{content}</span>}
+        {email && <span data-testid="modal-email">{email}</span>}
+        {showLink && <span data-testid="modal-show-link">link</span>}
+      </div>
+    ) : null,
 }))
 
 // ─── Test data factories ────────────────────────────────────────────────────
@@ -141,13 +155,9 @@ const setupContexts = (
     allowRefreshEducationVerify: false,
     ...providerOverrides,
   }
-  mockAppCtx = {
+  mockConsoleState = {
     isCurrentWorkspaceManager: true,
-    workspacePermissionKeys: [
-      'billing.view',
-      'billing.manage',
-      'billing.subscription.manage',
-    ],
+    workspacePermissionKeys: ['billing.view', 'billing.manage', 'billing.subscription.manage'],
     userProfile: { email: 'student@university.edu' },
     langGeniusVersionInfo: { current_version: '1.0.0' },
     ...appOverrides,
@@ -181,11 +191,14 @@ describe('Education Verification Flow', () => {
     })
 
     it('should not show verify button when already verified and not about to expire', () => {
-      setupContexts({}, {
-        enableEducationPlan: true,
-        isEducationAccount: true,
-        allowRefreshEducationVerify: false,
-      })
+      setupContexts(
+        {},
+        {
+          enableEducationPlan: true,
+          isEducationAccount: true,
+          allowRefreshEducationVerify: false,
+        },
+      )
 
       render(<PlanComp loc="test" />)
 
@@ -193,11 +206,14 @@ describe('Education Verification Flow', () => {
     })
 
     it('should show verify button when about to expire (allowRefreshEducationVerify is true)', () => {
-      setupContexts({}, {
-        enableEducationPlan: true,
-        isEducationAccount: true,
-        allowRefreshEducationVerify: true,
-      })
+      setupContexts(
+        {},
+        {
+          enableEducationPlan: true,
+          isEducationAccount: true,
+          allowRefreshEducationVerify: true,
+        },
+      )
 
       render(<PlanComp loc="test" />)
 
@@ -325,10 +341,7 @@ describe('Education Verification Flow', () => {
     })
 
     it('should show team plan with plain upgrade button and education button', () => {
-      setupContexts(
-        { type: Plan.team },
-        { enableEducationPlan: true, isEducationAccount: false },
-      )
+      setupContexts({ type: Plan.team }, { enableEducationPlan: true, isEducationAccount: false })
 
       render(<PlanComp loc="test" />)
 

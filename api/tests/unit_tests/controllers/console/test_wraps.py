@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from typing import override
 from unittest.mock import MagicMock, patch
 
@@ -5,6 +6,8 @@ import pytest
 from flask import Flask, request
 from flask_login import LoginManager, UserMixin
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 from werkzeug.exceptions import HTTPException
 
 from controllers.common.wraps import _extract_resource_id
@@ -13,8 +16,10 @@ from controllers.console.workspace.error import AccountNotInitializedError
 from controllers.console.wraps import (
     RBACPermission,
     RBACResourceScope,
+    _is_setup_completed,
     account_initialization_required,
     cloud_edition_billing_enabled,
+    cloud_edition_billing_paid_plan_required,
     cloud_edition_billing_rate_limit_check,
     cloud_edition_billing_resource_check,
     cloud_utm_record,
@@ -32,7 +37,14 @@ from controllers.console.wraps import (
 )
 from models import Account
 from models.account import AccountStatus, TenantAccountRole
+from models.dataset import RateLimitLog
 from services.feature_service import LicenseStatus
+
+
+@pytest.fixture(autouse=True)
+def reset_setup_required_cache():
+    """Keep setup_required's process cache isolated across unit tests."""
+    _is_setup_completed.reset_success()
 
 
 class MockUser(UserMixin):
@@ -481,6 +493,53 @@ class TestBillingEnabled:
         get_features.assert_not_called()
 
 
+class TestBillingPaidPlanRequired:
+    @pytest.mark.parametrize("plan", ["professional", "team"])
+    def test_should_allow_paid_plan(self, plan: str):
+        @cloud_edition_billing_paid_plan_required
+        def paid_view():
+            return "paid_success"
+
+        billing_info = {"enabled": True, "subscription": {"plan": plan}}
+        with (
+            patch(
+                "controllers.console.wraps.current_account_with_tenant",
+                return_value=(MockUser("test_user"), "tenant123"),
+            ),
+            patch("controllers.console.wraps.BillingService.get_info", return_value=billing_info) as get_info,
+        ):
+            result = paid_view()
+
+        assert result == "paid_success"
+        get_info.assert_called_once_with("tenant123", exclude_vector_space=True)
+
+    @pytest.mark.parametrize(
+        ("enabled", "plan"),
+        [(False, "professional"), (True, "sandbox"), (True, "unknown")],
+    )
+    def test_should_reject_non_paid_plan(self, enabled: bool, plan: str):
+        app = create_app_with_login()
+
+        @cloud_edition_billing_paid_plan_required
+        def paid_view():
+            return "paid_success"
+
+        billing_info = {"enabled": enabled, "subscription": {"plan": plan}}
+        with app.test_request_context():
+            with (
+                patch(
+                    "controllers.console.wraps.current_account_with_tenant",
+                    return_value=(MockUser("test_user"), "tenant123"),
+                ),
+                patch("controllers.console.wraps.BillingService.get_info", return_value=billing_info),
+                pytest.raises(HTTPException) as exc_info,
+            ):
+                paid_view()
+
+        assert exc_info.value.code == 403
+        assert "requires a paid plan" in str(exc_info.value.description)
+
+
 class TestBillingResourceLimits:
     """Test billing resource limit decorators"""
 
@@ -602,8 +661,7 @@ class TestRateLimiting:
     """Test rate limiting decorator"""
 
     @patch("controllers.console.wraps.redis_client")
-    @patch("controllers.console.wraps.db")
-    def test_should_allow_requests_within_rate_limit(self, mock_db: MagicMock, mock_redis: MagicMock):
+    def test_should_allow_requests_within_rate_limit(self, mock_redis: MagicMock):
         """Test that requests within rate limit are allowed"""
         # Arrange
         mock_rate_limit = MagicMock()
@@ -630,8 +688,13 @@ class TestRateLimiting:
         mock_redis.zremrangebyscore.assert_called_once()
 
     @patch("controllers.console.wraps.redis_client")
-    @patch("controllers.console.wraps.db")
-    def test_should_reject_requests_over_rate_limit(self, mock_db: MagicMock, mock_redis: MagicMock):
+    @pytest.mark.parametrize("sqlite_session", [(RateLimitLog,)], indirect=True)
+    def test_should_reject_requests_over_rate_limit(
+        self,
+        mock_redis: MagicMock,
+        sqlite_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """Test that requests over rate limit are rejected and logged"""
         # Arrange
         app = create_app_with_login()
@@ -641,8 +704,7 @@ class TestRateLimiting:
         mock_rate_limit.subscription_plan = "pro"
         mock_redis.zcard.return_value = 11  # Over limit
 
-        mock_session = MagicMock()
-        mock_db.session = mock_session
+        monkeypatch.setattr("controllers.console.wraps.db", SimpleNamespace(session=sqlite_session))
 
         @cloud_edition_billing_rate_limit_check("knowledge")
         def knowledge_request():
@@ -664,9 +726,11 @@ class TestRateLimiting:
                     assert exc_info.value.code == 403
                     assert "rate limit" in str(exc_info.value.description)
 
-                    # Verify rate limit log was created
-                    mock_session.add.assert_called_once()
-                    mock_session.commit.assert_called_once()
+                    rate_limit_log = sqlite_session.scalar(select(RateLimitLog))
+                    assert rate_limit_log is not None
+                    assert rate_limit_log.tenant_id == "tenant123"
+                    assert rate_limit_log.subscription_plan == "pro"
+                    assert rate_limit_log.operation == "knowledge"
 
 
 class TestCloudUtmRecord:
@@ -734,6 +798,39 @@ class TestSystemSetup:
 
         # Assert
         assert result == "admin_success"
+
+    @patch("controllers.console.wraps.db")
+    def test_should_cache_completed_setup(self, mock_db):
+        """Test that completed setup skips repeated DB reads in this process"""
+        mock_db.session.scalar.return_value = MagicMock()
+
+        @setup_required
+        def admin_view():
+            return "admin_success"
+
+        with patch("controllers.console.wraps.dify_config.EDITION", "SELF_HOSTED"):
+            assert admin_view() == "admin_success"
+            assert admin_view() == "admin_success"
+
+        assert mock_db.session.scalar.call_count == 1
+
+    @patch("controllers.console.wraps.db")
+    @patch("controllers.console.wraps.os.environ.get")
+    def test_should_not_cache_missing_setup(self, mock_environ_get, mock_db):
+        """Test that first-time bootstrap completion can be observed later in the same process"""
+        mock_db.session.scalar.side_effect = [None, MagicMock()]
+        mock_environ_get.return_value = None
+
+        @setup_required
+        def admin_view():
+            return "admin_success"
+
+        with patch("controllers.console.wraps.dify_config.EDITION", "SELF_HOSTED"):
+            with pytest.raises(NotSetupError):
+                admin_view()
+            assert admin_view() == "admin_success"
+
+        assert mock_db.session.scalar.call_count == 2
 
     @patch("controllers.console.wraps.db")
     @patch("controllers.console.wraps.os.environ.get")

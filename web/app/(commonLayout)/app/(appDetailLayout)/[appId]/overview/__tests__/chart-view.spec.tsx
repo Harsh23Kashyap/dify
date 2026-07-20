@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
+import { renderWithAccountProfile as render } from '@/test/console/account-profile'
 import { AppACLPermission } from '@/utils/permission'
 import ChartView from '../chart-view'
 
@@ -14,17 +15,18 @@ const testState = vi.hoisted(() => ({
   chartRenderSpy: vi.fn(),
 }))
 
-vi.mock('@/app/components/app/store', () => ({
-  useStore: <T,>(selector: (state: { appDetail: typeof testState.appDetail }) => T): T => selector({
-    appDetail: testState.appDetail,
-  }),
-}))
+vi.mock('@/context/workspace-state', async () => {
+  const { createWorkspaceStateModuleMock } = await import('@/test/console/state-fixture')
+  return createWorkspaceStateModuleMock(() => ({
+    currentWorkspace: { id: 'workspace-1' },
+  }))
+})
 
-vi.mock('@/context/app-context', () => ({
-  useSelector: vi.fn((selector: (state: { userProfile: { id: string }, workspacePermissionKeys: string[] }) => unknown) => selector({
-    userProfile: { id: testState.currentUserId },
-    workspacePermissionKeys: testState.workspacePermissionKeys,
-  })),
+vi.mock('@/app/components/app/store', () => ({
+  useStore: <T,>(selector: (state: { appDetail: typeof testState.appDetail }) => T): T =>
+    selector({
+      appDetail: testState.appDetail,
+    }),
 }))
 
 vi.mock('@/context/i18n', () => ({
@@ -90,6 +92,14 @@ vi.mock('../time-range-picker', () => ({
   default: () => <button type="button">time range</button>,
 }))
 
+vi.mock('@/context/permission-state', async () => {
+  const { createPermissionStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createPermissionStateModuleMock(() => ({
+    workspacePermissionKeys: [],
+  }))
+})
+
 describe('ChartView monitor permission', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -108,7 +118,9 @@ describe('ChartView monitor permission', () => {
     it('should not render monitoring charts when app monitor permission is missing', () => {
       render(<ChartView appId="app-1" headerRight={<button type="button">header action</button>} />)
 
-      expect(screen.queryByRole('heading', { name: 'common.appMenus.overview' })).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('heading', { name: 'common.appMenus.overview' }),
+      ).not.toBeInTheDocument()
       expect(screen.queryByText('header action')).not.toBeInTheDocument()
       expect(testState.chartRenderSpy).not.toHaveBeenCalled()
     })

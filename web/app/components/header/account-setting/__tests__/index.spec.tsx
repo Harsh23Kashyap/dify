@@ -1,18 +1,31 @@
 import type { AccountSettingTab } from '../constants'
-import type { AppContextValue } from '@/context/app-context'
+import type { ConsoleStateFixture } from '@/test/console/state-fixture'
 import { fireEvent, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { renderWithSystemFeatures } from '@/__tests__/utils/mock-system-features'
-import { useAppContext } from '@/context/app-context'
 import { baseProviderContextValue, useProviderContext } from '@/context/provider-context'
 import useBreakpoints, { MediaType } from '@/hooks/use-breakpoints'
+import { renderWithConsoleQuery } from '@/test/console/query-data'
 import { ACCOUNT_SETTING_TAB } from '../constants'
 import AccountSetting from '../index'
 
 const mockResetModelProviderListExpanded = vi.fn()
-const mockAppContextState = vi.hoisted(() => ({
+const mockConfig = vi.hoisted(() => ({
+  IS_CLOUD_EDITION: true,
+}))
+const mockConsoleState = vi.hoisted(() => ({
   current: null as unknown,
 }))
+
+vi.mock('@/config', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/config')>()
+  return {
+    ...actual,
+    get IS_CLOUD_EDITION() {
+      return mockConfig.IS_CLOUD_EDITION
+    },
+  }
+})
 
 vi.mock('@/context/provider-context', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/context/provider-context')>()
@@ -22,13 +35,21 @@ vi.mock('@/context/provider-context', async (importOriginal) => {
   }
 })
 
-vi.mock('@/context/app-context', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/context/app-context')>()
-  return {
-    ...actual,
-    useAppContext: vi.fn(),
-    useSelector: vi.fn((selector: (state: unknown) => unknown) => selector(mockAppContextState.current)),
-  }
+vi.mock('@/context/account-state', async () => {
+  const { createAccountStateModuleMock } = await import('@/test/console/state-fixture')
+  return createAccountStateModuleMock(() => mockConsoleState.current ?? {})
+})
+vi.mock('@/context/workspace-state', async () => {
+  const { createWorkspaceStateModuleMock } = await import('@/test/console/state-fixture')
+  return createWorkspaceStateModuleMock(() => mockConsoleState.current ?? {})
+})
+vi.mock('@/context/permission-state', async () => {
+  const { createPermissionStateModuleMock } = await import('@/test/console/state-fixture')
+  return createPermissionStateModuleMock(() => mockConsoleState.current ?? {})
+})
+vi.mock('@/context/version-state', async () => {
+  const { createVersionStateModuleMock } = await import('@/test/console/state-fixture')
+  return createVersionStateModuleMock(() => mockConsoleState.current ?? {})
 })
 
 vi.mock('@/next/navigation', () => ({
@@ -58,29 +79,39 @@ vi.mock('next-themes', () => ({
   })),
 }))
 
-vi.mock('@/app/components/header/account-setting/model-provider-page/hooks', () => ({
-  useDefaultModel: vi.fn(() => ({ data: null, isLoading: false })),
-  useLanguage: vi.fn(() => 'en-US'),
-  useUpdateDefaultModel: vi.fn(() => ({ trigger: vi.fn() })),
-  useUpdateModelList: vi.fn(() => vi.fn()),
-  useInvalidateDefaultModel: vi.fn(() => vi.fn()),
-  useModelList: vi.fn(() => ({ data: [], isLoading: false })),
-  useSystemDefaultModelAndModelList: vi.fn(() => [null, vi.fn()]),
-  useMarketplaceAllPlugins: vi.fn(() => ({ plugins: [], isLoading: false })),
-}))
-
 vi.mock('@/app/components/header/account-setting/model-provider-page/atoms', () => ({
   useResetModelProviderListExpanded: () => mockResetModelProviderListExpanded,
+}))
+
+vi.mock('@/app/components/header/account-setting/model-provider-page', () => ({
+  default: ({
+    onSearchTextChange,
+    searchText,
+  }: {
+    onSearchTextChange?: (value: string) => void
+    searchText: string
+  }) => (
+    <input
+      type="search"
+      aria-label="common.operation.search"
+      value={searchText}
+      onChange={(event) => onSearchTextChange?.(event.target.value)}
+    />
+  ),
 }))
 
 vi.mock('@/service/use-datasource', () => ({
   useGetDataSourceListAuth: vi.fn(() => ({ data: { result: [] } })),
 }))
 
-vi.mock('@/service/use-common', () => ({
-  useMembers: vi.fn(() => ({ data: { accounts: [] }, refetch: vi.fn() })),
-  useProviderContext: vi.fn(),
-}))
+vi.mock('@/service/use-common', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/service/use-common')>()
+  return {
+    ...actual,
+    useMembers: vi.fn(() => ({ data: { accounts: [] }, refetch: vi.fn() })),
+    useProviderContext: vi.fn(),
+  }
+})
 
 vi.mock('@/service/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/service/client')>()
@@ -125,7 +156,7 @@ vi.mock('@/app/components/header/account-setting/access-rules-page', () => ({
   default: () => <div data-testid="access-rules-page" />,
 }))
 
-const baseAppContextValue: AppContextValue = {
+const baseConsoleState: ConsoleStateFixture = {
   userProfile: {
     id: '1',
     name: 'Test User',
@@ -134,7 +165,7 @@ const baseAppContextValue: AppContextValue = {
     avatar_url: '',
     is_password_set: false,
   },
-  mutateUserProfile: vi.fn(),
+  refreshUserProfile: vi.fn(),
   currentWorkspace: {
     id: '1',
     name: 'Workspace',
@@ -151,7 +182,7 @@ const baseAppContextValue: AppContextValue = {
   isCurrentWorkspaceOwner: true,
   isCurrentWorkspaceEditor: true,
   isCurrentWorkspaceDatasetOperator: false,
-  mutateCurrentWorkspace: vi.fn(),
+  refreshCurrentWorkspace: vi.fn(),
   langGeniusVersionInfo: {
     current_env: 'testing',
     current_version: '0.1.0',
@@ -161,9 +192,7 @@ const baseAppContextValue: AppContextValue = {
     version: '0.1.0',
     can_auto_update: false,
   },
-  useSelector: vi.fn(),
   isLoadingCurrentWorkspace: false,
-  isValidatingCurrentWorkspace: false,
   workspacePermissionKeys: [
     'workspace.member.manage',
     'workspace.role.manage',
@@ -207,7 +236,7 @@ describe('AccountSetting', () => {
       )
     }
 
-    return renderWithSystemFeatures(<StatefulAccountSetting />, {
+    return renderWithConsoleQuery(<StatefulAccountSetting />, {
       systemFeatures: {
         webapp_auth: { enabled: true },
         branding: { enabled: false },
@@ -220,13 +249,13 @@ describe('AccountSetting', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockConfig.IS_CLOUD_EDITION = true
     vi.mocked(useProviderContext).mockReturnValue({
       ...baseProviderContextValue,
       enableBilling: true,
       enableReplaceWebAppLogo: true,
     })
-    vi.mocked(useAppContext).mockReturnValue(baseAppContextValue)
-    mockAppContextState.current = baseAppContextValue
+    mockConsoleState.current = baseConsoleState
     vi.mocked(useBreakpoints).mockReturnValue(MediaType.pc)
   })
 
@@ -240,12 +269,22 @@ describe('AccountSetting', () => {
       expect(screen.getAllByText('common.settings.workspace').length).toBeGreaterThan(0)
       expect(screen.queryByText('common.settings.provider'))!.not.toBeInTheDocument()
       expect(screen.getAllByText('common.settings.members').length).toBeGreaterThan(0)
-      expect(screen.getByRole('button', { name: 'common.settings.rolesAndPermissions' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'common.settings.permissionSet' })).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'common.settings.rolesAndPermissions' }),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'common.settings.permissionSet' }),
+      ).toBeInTheDocument()
       expect(screen.getByText('common.settings.billing'))!.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'appLog.archives.title' })).toBeInTheDocument()
       expect(screen.queryByText('common.settings.dataSource'))!.not.toBeInTheDocument()
       expect(screen.queryByText('common.settings.customEndpoint'))!.not.toBeInTheDocument()
       expect(screen.getByText('custom.custom'))!.toBeInTheDocument()
+      expect(
+        screen
+          .getByRole('button', { name: 'custom.custom' })
+          .compareDocumentPosition(screen.getByRole('button', { name: 'appLog.archives.title' })),
+      ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
       expect(screen.getByText('common.settings.preferences'))!.toBeInTheDocument()
     })
 
@@ -345,32 +384,39 @@ describe('AccountSetting', () => {
     it('should not hide workspace menu items solely for dataset operators', () => {
       // Arrange
       const datasetOperatorContext = {
-        ...baseAppContextValue,
+        ...baseConsoleState,
         isCurrentWorkspaceDatasetOperator: true,
       }
-      vi.mocked(useAppContext).mockReturnValue(datasetOperatorContext)
-      mockAppContextState.current = datasetOperatorContext
+      mockConsoleState.current = datasetOperatorContext
 
       // Act
       renderAccountSetting()
 
       // Assert
       expect(screen.getByRole('button', { name: 'common.settings.members' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'common.settings.rolesAndPermissions' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'common.settings.permissionSet' })).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'common.settings.rolesAndPermissions' }),
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'common.settings.permissionSet' }),
+      ).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'common.settings.billing' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'appLog.archives.title' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'custom.custom' })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: 'common.settings.preferences' })).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'common.settings.preferences' }),
+      ).toBeInTheDocument()
     })
 
     it('should keep moved integrations hidden when api extension permission is missing', () => {
       // Arrange
       const contextWithoutApiExtensionPermission = {
-        ...baseAppContextValue,
-        workspacePermissionKeys: baseAppContextValue.workspacePermissionKeys.filter(key => key !== 'api_extension.manage'),
+        ...baseConsoleState,
+        workspacePermissionKeys: baseConsoleState.workspacePermissionKeys!.filter(
+          (key) => key !== 'api_extension.manage',
+        ),
       }
-      vi.mocked(useAppContext).mockReturnValue(contextWithoutApiExtensionPermission)
-      mockAppContextState.current = contextWithoutApiExtensionPermission
+      mockConsoleState.current = contextWithoutApiExtensionPermission
 
       // Act
       renderAccountSetting()
@@ -384,11 +430,12 @@ describe('AccountSetting', () => {
     it('should show custom tab when customization permission is missing', () => {
       // Arrange
       const contextWithoutCustomizationPermission = {
-        ...baseAppContextValue,
-        workspacePermissionKeys: baseAppContextValue.workspacePermissionKeys.filter(key => key !== 'customization.manage'),
+        ...baseConsoleState,
+        workspacePermissionKeys: baseConsoleState.workspacePermissionKeys!.filter(
+          (key) => key !== 'customization.manage',
+        ),
       }
-      vi.mocked(useAppContext).mockReturnValue(contextWithoutCustomizationPermission)
-      mockAppContextState.current = contextWithoutCustomizationPermission
+      mockConsoleState.current = contextWithoutCustomizationPermission
 
       // Act
       renderAccountSetting()
@@ -396,6 +443,7 @@ describe('AccountSetting', () => {
       // Assert
       expect(screen.queryByText('common.settings.provider')).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'common.settings.members' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'appLog.archives.title' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'custom.custom' })).toBeInTheDocument()
       expect(screen.getByText('common.settings.preferences'))!.toBeInTheDocument()
     })
@@ -403,19 +451,24 @@ describe('AccountSetting', () => {
     it('should hide role and permission set entries when role management permission is missing', () => {
       // Arrange
       const contextWithoutRoleManagePermission = {
-        ...baseAppContextValue,
-        workspacePermissionKeys: baseAppContextValue.workspacePermissionKeys.filter(key => key !== 'workspace.role.manage'),
+        ...baseConsoleState,
+        workspacePermissionKeys: baseConsoleState.workspacePermissionKeys!.filter(
+          (key) => key !== 'workspace.role.manage',
+        ),
       }
-      vi.mocked(useAppContext).mockReturnValue(contextWithoutRoleManagePermission)
-      mockAppContextState.current = contextWithoutRoleManagePermission
+      mockConsoleState.current = contextWithoutRoleManagePermission
 
       // Act
       renderAccountSetting()
 
       // Assert
       expect(screen.getByRole('button', { name: 'common.settings.members' })).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'common.settings.rolesAndPermissions' })).not.toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'common.settings.permissionSet' })).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'common.settings.rolesAndPermissions' }),
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'common.settings.permissionSet' }),
+      ).not.toBeInTheDocument()
     })
 
     it('should hide role and permission set entries when RBAC is disabled', () => {
@@ -424,8 +477,12 @@ describe('AccountSetting', () => {
 
       // Assert
       expect(screen.getByRole('button', { name: 'common.settings.members' })).toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'common.settings.rolesAndPermissions' })).not.toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: 'common.settings.permissionSet' })).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'common.settings.rolesAndPermissions' }),
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'common.settings.permissionSet' }),
+      ).not.toBeInTheDocument()
     })
 
     it('should not render direct role pages when RBAC is disabled', () => {
@@ -451,36 +508,6 @@ describe('AccountSetting', () => {
 
       // Assert
       // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
-      // Assert
       expect(screen.queryByText('common.settings.billing')).not.toBeInTheDocument()
       expect(screen.queryByText('custom.custom')).not.toBeInTheDocument()
     })
@@ -488,27 +515,82 @@ describe('AccountSetting', () => {
     it('should hide billing entry when billing view permission is missing', () => {
       // Arrange
       const contextWithoutBillingViewPermission = {
-        ...baseAppContextValue,
-        workspacePermissionKeys: baseAppContextValue.workspacePermissionKeys.filter(key => key !== 'billing.view'),
+        ...baseConsoleState,
+        workspacePermissionKeys: baseConsoleState.workspacePermissionKeys!.filter(
+          (key) => key !== 'billing.view',
+        ),
       }
-      vi.mocked(useAppContext).mockReturnValue(contextWithoutBillingViewPermission)
-      mockAppContextState.current = contextWithoutBillingViewPermission
+      mockConsoleState.current = contextWithoutBillingViewPermission
 
       // Act
       renderAccountSetting()
 
       // Assert
-      expect(screen.queryByRole('button', { name: 'common.settings.billing' })).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'common.settings.billing' }),
+      ).not.toBeInTheDocument()
+    })
+
+    it('should hide workflow log archives outside cloud edition', () => {
+      // Arrange
+      mockConfig.IS_CLOUD_EDITION = false
+
+      // Act
+      renderAccountSetting()
+
+      // Assert
+      expect(
+        screen.queryByRole('button', { name: 'appLog.archives.title' }),
+      ).not.toBeInTheDocument()
+    })
+
+    it('should hide workflow log archives from custom RBAC roles that are not owner or admin', () => {
+      // Arrange
+      const contextWithRoleManagePermissionButNotManager = {
+        ...baseConsoleState,
+        currentWorkspace: {
+          ...baseConsoleState.currentWorkspace,
+          role: 'normal' as const,
+        },
+        isCurrentWorkspaceManager: false,
+        isCurrentWorkspaceOwner: false,
+        workspacePermissionKeys: [
+          ...(baseConsoleState.workspacePermissionKeys ?? []),
+          'workspace.role.manage',
+        ],
+      }
+      mockConsoleState.current = contextWithRoleManagePermissionButNotManager
+
+      // Act
+      renderAccountSetting()
+
+      // Assert
+      expect(
+        screen.queryByRole('button', { name: 'appLog.archives.title' }),
+      ).not.toBeInTheDocument()
+    })
+
+    it('should not render workflow log archives page outside cloud edition', () => {
+      // Arrange
+      mockConfig.IS_CLOUD_EDITION = false
+
+      // Act
+      renderAccountSetting({ initialTab: ACCOUNT_SETTING_TAB.WORKFLOW_LOG_ARCHIVES })
+
+      // Assert
+      expect(screen.queryByText('appLog.archives.upgradeTip.title')).not.toBeInTheDocument()
+      expect(screen.getAllByText('common.settings.members').length).toBeGreaterThan(0)
     })
 
     it('should not render billing page when active billing tab lacks billing view permission', () => {
       // Arrange
       const contextWithoutBillingViewPermission = {
-        ...baseAppContextValue,
-        workspacePermissionKeys: baseAppContextValue.workspacePermissionKeys.filter(key => key !== 'billing.view'),
+        ...baseConsoleState,
+        workspacePermissionKeys: baseConsoleState.workspacePermissionKeys!.filter(
+          (key) => key !== 'billing.view',
+        ),
       }
-      vi.mocked(useAppContext).mockReturnValue(contextWithoutBillingViewPermission)
-      mockAppContextState.current = contextWithoutBillingViewPermission
+      mockConsoleState.current = contextWithoutBillingViewPermission
 
       // Act
       renderAccountSetting({ initialTab: ACCOUNT_SETTING_TAB.BILLING })
@@ -545,6 +627,10 @@ describe('AccountSetting', () => {
       fireEvent.click(screen.getByText('custom.custom'))
       // Custom Page uses 'custom.custom' key as well.
       expect(screen.getAllByText('custom.custom').length).toBeGreaterThan(1)
+
+      // Workflow Log Archives
+      fireEvent.click(screen.getByRole('button', { name: 'appLog.archives.title' }))
+      expect(screen.getByText('appLog.archives.upgradeTip.title')).toBeInTheDocument()
 
       // Members
       fireEvent.click(screen.getAllByText('common.settings.members')[0]!)
@@ -599,18 +685,17 @@ describe('AccountSetting', () => {
       expect(mockOnCancel).toHaveBeenCalled()
     })
 
-    it('should update search value in provider tab', () => {
+    it('should keep provider search controlled at the account setting boundary', async () => {
       // Arrange
+      const user = userEvent.setup()
       renderAccountSetting({ initialTab: ACCOUNT_SETTING_TAB.PROVIDER })
 
       // Act
       const input = screen.getByRole('searchbox', { name: 'common.operation.search' })
-      fireEvent.change(input, { target: { value: 'test-search' } })
+      await user.type(input, 'test-search')
 
       // Assert
-      // Assert
       expect(input)!.toHaveValue('test-search')
-      expect(screen.getByPlaceholderText('common.modelProvider.searchModels'))!.toBeInTheDocument()
     })
 
     it('should handle scroll event in panel', () => {

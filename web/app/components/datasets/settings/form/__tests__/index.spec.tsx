@@ -1,8 +1,9 @@
 import type { DataSet } from '@/models/datasets'
 import type { RetrievalConfig } from '@/types/app'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { ChunkingMode, DatasetPermission, DataSourceType } from '@/models/datasets'
 import { expectLoadingButton } from '@/test/button'
+import { render } from '@/test/console/render'
 import { RETRIEVE_METHOD } from '@/types/app'
 import { DatasetACLPermission } from '@/utils/permission'
 import { IndexingType } from '../../../create/step-two'
@@ -37,15 +38,43 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
   }
 })
 
-vi.mock('@/context/app-context', () => ({
-  useSelector: (selector: (state: unknown) => unknown) => {
-    const state = {
+vi.mock('@/context/account-state', async () => {
+  const { createAccountStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createAccountStateModuleMock(() => ({
+    userProfile: mockUserProfile,
+    workspacePermissionKeys: mockWorkspacePermissionKeys,
+  }))
+})
+vi.mock('@/context/workspace-state', async () => {
+  const { createWorkspaceStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createWorkspaceStateModuleMock(() => ({
+    userProfile: mockUserProfile,
+    workspacePermissionKeys: mockWorkspacePermissionKeys,
+  }))
+})
+vi.mock('@/context/permission-state', async () => {
+  const { createPermissionStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createPermissionStateModuleMock(() => ({
+    userProfile: mockUserProfile,
+    workspacePermissionKeys: mockWorkspacePermissionKeys,
+  }))
+})
+vi.mock('@/context/system-features-state', async () => {
+  const { createSystemFeaturesStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createSystemFeaturesStateModuleMock(() => ({
+    ...(() => ({
       userProfile: mockUserProfile,
       workspacePermissionKeys: mockWorkspacePermissionKeys,
-    }
-    return selector(state)
-  },
-}))
+    }))(),
+    datasetRbacEnabled: (() => ({
+      isRbacEnabled: false,
+    }))().isRbacEnabled,
+  }))
+})
 
 const createMockDataset = (overrides: Partial<DataSet> = {}): DataSet => ({
   id: 'dataset-1',
@@ -120,7 +149,9 @@ const createMockDataset = (overrides: Partial<DataSet> = {}): DataSet => ({
 let mockDataset: DataSet = createMockDataset()
 
 vi.mock('@/context/dataset-detail', () => ({
-  useDatasetDetailContextWithSelector: (selector: (state: { dataset: DataSet | null, mutateDatasetRes: () => void }) => unknown) => {
+  useDatasetDetailContextWithSelector: (
+    selector: (state: { dataset: DataSet | null; mutateDatasetRes: () => void }) => unknown,
+  ) => {
     const state = {
       dataset: mockDataset,
       mutateDatasetRes: mockMutateDatasets,
@@ -142,8 +173,28 @@ vi.mock('@/service/use-common', () => ({
   useMembers: () => ({
     data: {
       accounts: [
-        { id: 'user-1', name: 'User 1', email: 'user1@example.com', role: 'owner', avatar: '', avatar_url: '', last_login_at: '', created_at: '', status: 'active' },
-        { id: 'user-2', name: 'User 2', email: 'user2@example.com', role: 'admin', avatar: '', avatar_url: '', last_login_at: '', created_at: '', status: 'active' },
+        {
+          id: 'user-1',
+          name: 'User 1',
+          email: 'user1@example.com',
+          role: 'owner',
+          avatar: '',
+          avatar_url: '',
+          last_login_at: '',
+          created_at: '',
+          status: 'active',
+        },
+        {
+          id: 'user-2',
+          name: 'User 2',
+          email: 'user2@example.com',
+          role: 'admin',
+          avatar: '',
+          avatar_url: '',
+          last_login_at: '',
+          created_at: '',
+          status: 'active',
+        },
       ],
     },
   }),
@@ -207,10 +258,6 @@ vi.mock('@langgenius/dify-ui/toast', () => ({
   },
 }))
 
-vi.mock('@/context/i18n', () => ({
-  useDocLink: () => (path: string) => `https://docs.dify.ai${path}`,
-}))
-
 vi.mock('../components/indexing-section', () => ({
   default: ({
     currentDataset,
@@ -228,12 +275,12 @@ vi.mock('../components/indexing-section', () => ({
           </a>
         </>
       )}
-      {!!(currentDataset
-        && currentDataset.doc_form !== ChunkingMode.parentChild
-        && currentDataset.indexing_technique
-        && indexMethod) && (
-        <div>form.indexMethod</div>
-      )}
+      {!!(
+        currentDataset &&
+        currentDataset.doc_form !== ChunkingMode.parentChild &&
+        currentDataset.indexing_technique &&
+        indexMethod
+      ) && <div>form.indexMethod</div>}
       {indexMethod === IndexingType.QUALIFIED && <div>form.embeddingModel</div>}
       {currentDataset?.provider !== 'external' && indexMethod && (
         <>
@@ -255,11 +302,6 @@ describe('Form', () => {
   })
 
   describe('Rendering', () => {
-    it('should render without crashing', () => {
-      render(<Form />)
-      expect(screen.getByRole('button', { name: /form\.save/i })).toBeInTheDocument()
-    })
-
     it('should render dataset name input with initial value', () => {
       render(<Form />)
       const nameInput = screen.getByDisplayValue('Test Dataset')
@@ -389,7 +431,7 @@ describe('Form', () => {
     it('should show loading state on save button while saving', async () => {
       const { updateDatasetSetting } = await import('@/service/datasets')
       vi.mocked(updateDatasetSetting).mockImplementation(
-        () => new Promise(resolve => setTimeout(resolve, 100)),
+        () => new Promise((resolve) => setTimeout(resolve, 100)),
       )
 
       render(<Form />)

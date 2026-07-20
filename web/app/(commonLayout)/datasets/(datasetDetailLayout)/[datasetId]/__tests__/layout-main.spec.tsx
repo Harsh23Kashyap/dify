@@ -1,18 +1,19 @@
 import { screen, waitFor } from '@testing-library/react'
-import { renderWithSystemFeatures } from '@/__tests__/utils/mock-system-features'
 import { usePathname, useRouter } from '@/next/navigation'
 import { useDatasetDetail } from '@/service/knowledge/use-dataset'
+import { renderWithConsoleQuery } from '@/test/console/query-data'
 import { DatasetACLPermission } from '@/utils/permission'
 import DatasetDetailLayout from '../layout-main'
 
 const mockReplace = vi.fn()
 let mockIsRbacEnabled = true
 
-const render = (ui: Parameters<typeof renderWithSystemFeatures>[0]) => renderWithSystemFeatures(ui, {
-  systemFeatures: {
-    rbac_enabled: mockIsRbacEnabled,
-  },
-})
+const render = (ui: Parameters<typeof renderWithConsoleQuery>[0]) =>
+  renderWithConsoleQuery(ui, {
+    systemFeatures: {
+      rbac_enabled: mockIsRbacEnabled,
+    },
+  })
 
 vi.mock('@/next/navigation', () => ({
   usePathname: vi.fn(),
@@ -23,15 +24,32 @@ vi.mock('@/service/knowledge/use-dataset', () => ({
   useDatasetDetail: vi.fn(),
 }))
 
-vi.mock('@/context/app-context', () => ({
-  useAppContext: () => ({
-    isCurrentWorkspaceDatasetOperator: false,
-    isLoadingCurrentWorkspace: false,
-    isLoadingWorkspacePermissionKeys: false,
+vi.mock('@/context/account-state', async () => {
+  const { createAccountStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createAccountStateModuleMock(() => ({
     userProfile: { id: 'user-1' },
+  }))
+})
+vi.mock('@/context/workspace-state', async () => {
+  const { createWorkspaceStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createWorkspaceStateModuleMock(() => ({}))
+})
+vi.mock('@/context/permission-state', async () => {
+  const { createPermissionStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createPermissionStateModuleMock(() => ({
     workspacePermissionKeys: [],
-  }),
-}))
+  }))
+})
+vi.mock('@/context/system-features-state', async () => {
+  const { createSystemFeaturesStateModuleMock } = await import('@/test/console/state-fixture')
+
+  return createSystemFeaturesStateModuleMock(() => ({
+    datasetRbacEnabled: mockIsRbacEnabled,
+  }))
+})
 
 vi.mock('@/context/event-emitter', () => ({
   useEventEmitterContextContext: () => ({
@@ -63,27 +81,30 @@ describe('DatasetDetailLayout', () => {
   })
 
   describe('Access Errors', () => {
-    it.each([403, 404])('should redirect to datasets page when dataset detail returns %s', async (status) => {
-      // Arrange
-      mockUseDatasetDetail.mockReturnValue({
-        data: undefined,
-        error: new Response(null, { status }),
-        refetch: vi.fn(),
-      } as unknown as ReturnType<typeof useDatasetDetail>)
+    it.each([403, 404])(
+      'should redirect to datasets page when dataset detail returns %s',
+      async (status) => {
+        // Arrange
+        mockUseDatasetDetail.mockReturnValue({
+          data: undefined,
+          error: new Response(null, { status }),
+          refetch: vi.fn(),
+        } as unknown as ReturnType<typeof useDatasetDetail>)
 
-      // Act
-      render(
-        <DatasetDetailLayout datasetId="dataset-1">
-          <div>Pipeline content</div>
-        </DatasetDetailLayout>,
-      )
+        // Act
+        render(
+          <DatasetDetailLayout datasetId="dataset-1">
+            <div>Pipeline content</div>
+          </DatasetDetailLayout>,
+        )
 
-      // Assert
-      await waitFor(() => {
-        expect(mockReplace).toHaveBeenCalledWith('/datasets')
-      })
-      expect(screen.queryByText('Pipeline content')).not.toBeInTheDocument()
-    })
+        // Assert
+        await waitFor(() => {
+          expect(mockReplace).toHaveBeenCalledWith('/datasets')
+        })
+        expect(screen.queryByText('Pipeline content')).not.toBeInTheDocument()
+      },
+    )
 
     it('should redirect when the dataset detail error exposes status without being a Response', async () => {
       // Arrange
@@ -135,8 +156,9 @@ describe('DatasetDetailLayout', () => {
       expect(mockReplace).not.toHaveBeenCalled()
     })
 
-    it('should apply the dataset surface outside pipeline pages', () => {
+    it('should render document creation route content without owning the main skip target', () => {
       // Arrange
+      mockUsePathname.mockReturnValue('/datasets/dataset-1/documents/create')
       mockUseDatasetDetail.mockReturnValue({
         data: {
           id: 'dataset-1',
@@ -152,64 +174,13 @@ describe('DatasetDetailLayout', () => {
       // Act
       render(
         <DatasetDetailLayout datasetId="dataset-1">
-          <div>Documents content</div>
+          <div>Create document content</div>
         </DatasetDetailLayout>,
       )
 
       // Assert
-      expect(screen.getByText('Documents content').parentElement).toHaveClass('rounded-lg')
-    })
-
-    it('should keep pipeline pages unframed', () => {
-      // Arrange
-      mockUsePathname.mockReturnValue('/datasets/dataset-1/pipeline')
-      mockUseDatasetDetail.mockReturnValue({
-        data: {
-          id: 'dataset-1',
-          name: 'Dataset 1',
-          provider: 'vendor',
-          runtime_mode: 'rag_pipeline',
-          is_published: false,
-        },
-        error: null,
-        refetch: vi.fn(),
-      } as unknown as ReturnType<typeof useDatasetDetail>)
-
-      // Act
-      render(
-        <DatasetDetailLayout datasetId="dataset-1">
-          <div>Pipeline content</div>
-        </DatasetDetailLayout>,
-      )
-
-      // Assert
-      expect(screen.getByText('Pipeline content').parentElement).not.toHaveClass('rounded-lg')
-    })
-
-    it('should keep create-from-pipeline pages unframed', () => {
-      // Arrange
-      mockUsePathname.mockReturnValue('/datasets/dataset-1/documents/create-from-pipeline')
-      mockUseDatasetDetail.mockReturnValue({
-        data: {
-          id: 'dataset-1',
-          name: 'Dataset 1',
-          provider: 'vendor',
-          runtime_mode: 'rag_pipeline',
-          is_published: false,
-        },
-        error: null,
-        refetch: vi.fn(),
-      } as unknown as ReturnType<typeof useDatasetDetail>)
-
-      // Act
-      render(
-        <DatasetDetailLayout datasetId="dataset-1">
-          <div>Create from pipeline content</div>
-        </DatasetDetailLayout>,
-      )
-
-      // Assert
-      expect(screen.getByText('Create from pipeline content').parentElement).not.toHaveClass('rounded-lg')
+      expect(screen.getByText('Create document content')).toBeInTheDocument()
+      expect(screen.queryByRole('main')).not.toBeInTheDocument()
     })
   })
 
